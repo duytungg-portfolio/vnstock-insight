@@ -1,168 +1,113 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { Youtube, AlertCircle, ExternalLink } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import {
+  Link,
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+} from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+import { Button } from "@/components/ui/button";
 
 const YT_REGEX =
-  /(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
-
-function extractVideoId(url: string): string | null {
-  const match = url.match(YT_REGEX);
-  return match ? match[1] : null;
-}
-
-function getYouTubeThumbnail(videoId: string): string {
-  return `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+  /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([\w-]{11})/;
 
 interface YouTubeInputProps {
-  onUrlSubmit: (url: string, videoId: string) => void;
+  onUrlSubmit: (url: string) => void;
   disabled?: boolean;
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
+type ValidationState = "idle" | "validating" | "valid" | "error";
 
 export function YouTubeInput({ onUrlSubmit, disabled }: YouTubeInputProps) {
   const [url, setUrl] = useState("");
-  const [videoId, setVideoId] = useState<string | null>(null);
+  const [validation, setValidation] = useState<ValidationState>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  const handleUrlChange = useCallback((value: string) => {
-    setUrl(value);
-    setError(null);
-
-    if (!value.trim()) {
-      setVideoId(null);
-      return;
-    }
-
-    const id = extractVideoId(value.trim());
-    if (id) {
-      setVideoId(id);
-    } else if (value.trim().length > 10) {
-      setVideoId(null);
-      setError("Invalid YouTube URL. Please use a youtube.com or youtu.be link.");
-    } else {
-      setVideoId(null);
-    }
-  }, []);
-
-  const handleSubmit = useCallback(() => {
-    if (!videoId) {
-      setError("Please enter a valid YouTube URL.");
-      return;
-    }
-    onUrlSubmit(url.trim(), videoId);
-  }, [videoId, url, onUrlSubmit]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        handleSubmit();
+  const validateUrl = useCallback(
+    (value: string) => {
+      const match = value.match(YT_REGEX);
+      if (!match) {
+        if (value.includes("youtube") || value.includes("youtu.be")) {
+          setError("Invalid YouTube URL format. Check the link and try again.");
+          setValidation("error");
+        } else {
+          setError(null);
+          setValidation("idle");
+        }
+        return;
       }
+
+      setValidation("valid");
+      setError(null);
     },
-    [handleSubmit]
+    []
   );
 
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setUrl(value);
+    validateUrl(value);
+  };
+
+  const handleSubmit = useCallback(() => {
+    const match = url.match(YT_REGEX);
+    if (!match) {
+      setError("Please enter a valid YouTube URL.");
+      setValidation("error");
+      return;
+    }
+    onUrlSubmit(url);
+  }, [url, onUrlSubmit]);
+
   return (
-    <div className="space-y-4">
-      {/* URL input */}
-      <div className="relative">
-        <Youtube className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-        <Input
-          type="url"
-          placeholder="Paste YouTube URL (e.g. youtube.com/watch?v=...)"
-          value={url}
-          onChange={(e) => handleUrlChange(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={disabled}
-          className={cn(
-            "pl-10 pr-4 h-12 text-base rounded-xl border-border/60 bg-background shadow-sm focus-visible:shadow-md transition-shadow",
-            error && "border-destructive/50 focus-visible:border-destructive"
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Link className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Paste a YouTube URL (e.g. https://youtube.com/watch?v=...)"
+            value={url}
+            onChange={handleChange}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+            className={`pl-10 h-11 ${
+              validation === "error"
+                ? "border-destructive/50 focus-visible:ring-destructive/20"
+                : validation === "valid"
+                  ? "border-emerald-500/50 focus-visible:ring-emerald-500/20"
+                  : ""
+            }`}
+            disabled={disabled}
+          />
+          {validation === "valid" && (
+            <CheckCircle2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-emerald-500" />
           )}
-          autoComplete="off"
-        />
+          {validation === "validating" && (
+            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground animate-spin" />
+          )}
+        </div>
+        <Button
+          onClick={handleSubmit}
+          disabled={disabled || validation !== "valid"}
+          className="h-11 shrink-0"
+        >
+          Analyze
+        </Button>
       </div>
 
-      {/* Error message */}
-      <AnimatePresence>
-        {error && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="flex items-center gap-2 text-sm text-destructive"
-          >
-            <AlertCircle className="h-4 w-4 shrink-0" />
-            <span>{error}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Thumbnail preview */}
-      <AnimatePresence>
-        {videoId && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.2 }}
-            className="rounded-xl border border-border/60 bg-muted/20 p-4"
-          >
-            <div className="flex items-start gap-4">
-              {/* Thumbnail */}
-              <div className="relative h-20 w-32 shrink-0 overflow-hidden rounded-lg bg-muted">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={getYouTubeThumbnail(videoId)}
-                  alt="Video thumbnail"
-                  className="h-full w-full object-cover"
-                />
-                {/* Play overlay */}
-                <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                  <div className="h-8 w-8 rounded-full bg-red-600 flex items-center justify-center">
-                    <svg className="h-4 w-4 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor">
-                      <polygon points="5,3 19,12 5,21" />
-                    </svg>
-                  </div>
-                </div>
-              </div>
-
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground">
-                  YouTube Video
-                </p>
-                <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                  {url}
-                </p>
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-1.5"
-                >
-                  Open in YouTube
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Hint */}
-      <p className="text-xs text-muted-foreground text-center">
-        Supports youtube.com and youtu.be links
-      </p>
+      {/* Error messages */}
+      {error && (
+        <div className="flex items-center gap-2 text-xs text-destructive">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          {error}
+        </div>
+      )}
     </div>
   );
 }

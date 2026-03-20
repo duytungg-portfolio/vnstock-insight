@@ -1,155 +1,275 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import type { SectorMetric } from "@/types/stock";
+import {
+  AITimeoutError,
+  RateLimitError,
+  MalformedAIResponseError,
+  NetworkError,
+  classifyFetchError,
+  safeParseJSON,
+} from "@/lib/errors";
 
-// ─── Config ──────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
-const USE_MOCK = process.env.GEMINI_MOCK === "true";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
+const GEMINI_MODEL = "gemini-2.5-flash";
+const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// ─── Client ─────────────────────────────────────────────────────────────────
+const DEFAULT_TIMEOUT_MS = 45_000; // 2.5-flash uses thinking, needs more time
+const EXTENDED_TIMEOUT_MS = 90_000;
+const MAX_RETRIES = 2;
+const RATE_LIMIT_BACKOFF_MS = 5_000; // wait before retrying after 429
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? "");
+// ---------------------------------------------------------------------------
+// Core Gemini API call
+// ---------------------------------------------------------------------------
 
-function getModel() {
-  return genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-}
-
-// ─── Mock Data ──────────────────────────────────────────────────────────────
-
-function getMockSectorMetrics(ticker: string, sector: string): SectorMetric[] {
-  return [
-    {
-      name: "P/E Ratio",
-      currentValue: 14.2,
-      impact: "positive",
-      explanation: `${ticker} is trading at a reasonable valuation compared to ${sector} sector peers.`,
-      source: "TCBS Financial Data",
-    },
-    {
-      name: "ROE",
-      currentValue: 18.5,
-      impact: "positive",
-      explanation: "Strong return on equity indicates efficient use of shareholder capital.",
-      source: "TCBS Financial Data",
-    },
-    {
-      name: "Debt/Equity",
-      currentValue: 0.42,
-      impact: "neutral",
-      explanation: "Moderate leverage level, within acceptable range for the sector.",
-      source: "TCBS Financial Data",
-    },
-    {
-      name: "Revenue Growth",
-      currentValue: -3.8,
-      impact: "negative",
-      explanation: "Slight revenue decline year-over-year, monitor for recovery signs.",
-      source: "TCBS Financial Data",
-    },
-  ];
-}
-
-function getMockAIInsight(ticker: string, priceChangePercent: number): AIInsightResult {
-  const sentiment: AIInsightResult["sentiment"] =
-    priceChangePercent > 2 ? "bullish" : priceChangePercent < -2 ? "bearish" : "neutral";
-
-  return {
-    summary: `${ticker} shows mixed signals with recent price movement of ${priceChangePercent.toFixed(1)}%. Fundamental indicators remain solid with healthy profitability metrics, though market conditions warrant cautious optimism. Investors should monitor upcoming earnings reports for directional clarity.`,
-    sentiment,
-    keyPoints: [
-      "Strong profitability metrics above sector average",
-      "Healthy balance sheet with manageable debt levels",
-      "Consistent dividend payout history",
-    ],
-    risks: [
-      "Market volatility may pressure short-term performance",
-      "Sector-wide headwinds from regulatory changes",
-    ],
+interface GeminiResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+    finishReason?: string;
+  }>;
+  error?: {
+    code: number;
+    message: string;
   };
 }
 
-// ─── Sector Metrics ─────────────────────────────────────────────────────────
+async function callGemini(
+  systemPrompt: string,
+  userPrompt: string,
+  options?: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }
+): Promise<string> {
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not configured");
+  }
+
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Combine external abort with our timeout
+  if (options?.signal) {
+    options.signal.addEventListener("abort", () => controller.abort());
+  }
+
+  try {
+    const res = await fetch(
+      `${BASE_URL}/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [{ text: systemPrompt }],
+          },
+          contents: [
+            {
+              parts: [{ text: userPrompt }],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 8192,
+          },
+        }),
+        signal: controller.signal,
+      }
+    );
+
+    if (res.status === 429) {
+      // Parse retry delay from Gemini's error response
+      let retryMs = RATE_LIMIT_BACKOFF_MS;
+      try {
+        const errBody = await res.json();
+        const retryInfo = errBody?.error?.details?.find(
+          (d: Record<string, unknown>) =>
+            d["@type"] === "type.googleapis.com/google.rpc.RetryInfo"
+        );
+        if (retryInfo?.retryDelay) {
+          const seconds = parseFloat(retryInfo.retryDelay);
+          if (!isNaN(seconds)) retryMs = Math.ceil(seconds * 1000);
+        }
+        // Log the actual quota violation for debugging
+        const quotaMsg = errBody?.error?.message ?? "";
+        console.error(`[Gemini] 429 Rate Limited: ${quotaMsg.slice(0, 300)}`);
+      } catch {
+        // ignore parse error
+      }
+      throw new RateLimitError(retryMs);
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Gemini API HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+
+    const data = (await res.json()) as GeminiResponse;
+
+    if (data.error) {
+      throw new Error(`Gemini API error: ${data.error.message}`);
+    }
+
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      throw new MalformedAIResponseError("Empty response from Gemini");
+    }
+
+    return text;
+  } catch (err) {
+    if (
+      err instanceof AITimeoutError ||
+      err instanceof MalformedAIResponseError ||
+      err instanceof RateLimitError
+    ) {
+      throw err;
+    }
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new AITimeoutError();
+    }
+    throw classifyFetchError(err);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Retry wrapper with stricter prompt on malformed JSON
+// ---------------------------------------------------------------------------
+
+async function callGeminiWithRetry<T>(
+  systemPrompt: string,
+  userPrompt: string,
+  options?: { signal?: AbortSignal }
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const timeoutMs =
+        attempt === 1 ? DEFAULT_TIMEOUT_MS : EXTENDED_TIMEOUT_MS;
+
+      // On retry after malformed JSON, add extra strictness
+      const extraInstruction =
+        attempt > 1
+          ? "\n\nCRITICAL: Your previous response was NOT valid JSON. You MUST respond with ONLY valid JSON. No markdown code fences, no comments, no extra text. Start with { and end with }."
+          : "";
+
+      const raw = await callGemini(
+        systemPrompt + extraInstruction,
+        userPrompt,
+        { timeoutMs, signal: options?.signal }
+      );
+
+      return safeParseJSON<T>(raw);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      // Don't retry network errors or aborts
+      if (err instanceof NetworkError) throw err;
+      if (err instanceof Error && err.name === "AbortError") throw err;
+
+      // Rate limit: wait the specified backoff, then retry once
+      if (err instanceof RateLimitError && attempt < MAX_RETRIES) {
+        console.warn(
+          `[Gemini] Rate limited, waiting ${err.retryAfterMs}ms before retry...`
+        );
+        await new Promise((r) => setTimeout(r, err.retryAfterMs));
+        continue;
+      }
+
+      // Retry on malformed JSON or timeout
+      if (
+        (err instanceof MalformedAIResponseError ||
+          err instanceof AITimeoutError) &&
+        attempt < MAX_RETRIES
+      ) {
+        console.warn(
+          `[Gemini] Attempt ${attempt} failed (${err.constructor.name}), retrying...`
+        );
+        continue;
+      }
+
+      throw err;
+    }
+  }
+
+  throw lastError ?? new Error("Gemini call failed");
+}
+
+// ---------------------------------------------------------------------------
+// Public API functions
+// ---------------------------------------------------------------------------
+
+import type { SectorMetric, PricePoint } from "@/types/stock";
+import type { MeetingAnalysis } from "@/types/meeting";
+import {
+  getSectorMetricsPrompt,
+  getAIInsightPrompt,
+  getMeetingAnalysisPrompt,
+  getFollowUpPrompt,
+} from "@/lib/prompts";
 
 export async function generateSectorMetrics(
   ticker: string,
   sector: string,
-  financialData: Record<string, unknown>
+  financialData: Record<string, unknown>,
+  options?: { signal?: AbortSignal }
 ): Promise<SectorMetric[]> {
-  if (USE_MOCK) {
-    console.log("[Gemini] Using mock sector metrics");
-    return getMockSectorMetrics(ticker, sector);
-  }
-
-  const model = getModel();
-
-  const prompt = `You are a Vietnamese stock market analyst. Analyze the stock ${ticker} in the "${sector}" sector.
-
-Financial data: ${JSON.stringify(financialData)}
-
-Return exactly 4 key sector-specific metrics as a JSON array. Each metric must have:
-- "name": metric name (e.g., "NIM", "NPL Ratio", "P/E", "ROE")
-- "currentValue": numeric value (number, not string)
-- "impact": one of "positive", "negative", or "neutral"
-- "explanation": brief 1-sentence explanation of what this means for investors
-- "source": data source description
-
-Return ONLY the JSON array, no markdown fences, no extra text.`;
-
-  try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().trim();
-    const cleaned = text.replace(/```(?:json)?\n?/g, "").replace(/```$/g, "").trim();
-    const metrics = JSON.parse(cleaned) as SectorMetric[];
-    return metrics.slice(0, 4);
-  } catch (error) {
-    console.error("[Gemini] Failed to generate sector metrics:", error);
-    console.log("[Gemini] Falling back to mock data");
-    return getMockSectorMetrics(ticker, sector);
-  }
-}
-
-// ─── AI Insight ─────────────────────────────────────────────────────────────
-
-export interface AIInsightResult {
-  summary: string;
-  sentiment: "bullish" | "bearish" | "neutral";
-  keyPoints: string[];
-  risks: string[];
+  const { system, user } = getSectorMetricsPrompt(ticker, sector, financialData);
+  const result = await callGeminiWithRetry<{ metrics: SectorMetric[] }>(
+    system,
+    user,
+    options
+  );
+  return result.metrics ?? [];
 }
 
 export async function generateAIInsight(
   ticker: string,
-  sector: string,
-  financialData: Record<string, unknown>,
-  priceChangePercent: number
-): Promise<AIInsightResult> {
-  if (USE_MOCK) {
-    console.log("[Gemini] Using mock AI insight");
-    return getMockAIInsight(ticker, priceChangePercent);
-  }
+  metrics: SectorMetric[],
+  priceData: PricePoint[],
+  options?: { signal?: AbortSignal }
+): Promise<{
+  insight: string;
+  keyRisk: string;
+  keyOpportunity: string;
+  actionTags: string[];
+}> {
+  const { system, user } = getAIInsightPrompt(ticker, metrics, priceData);
+  return callGeminiWithRetry(system, user, options);
+}
 
-  const model = getModel();
+export async function analyzeMeeting(
+  companyName: string,
+  ticker: string,
+  transcript: string,
+  options?: { signal?: AbortSignal }
+): Promise<MeetingAnalysis> {
+  const { system, user } = getMeetingAnalysisPrompt(companyName, ticker);
+  const fullUser = user.replace(
+    "[TRANSCRIPT/VIDEO CONTENT WILL BE APPENDED HERE]",
+    transcript
+  );
+  return callGeminiWithRetry<MeetingAnalysis>(system, fullUser, options);
+}
 
-  const prompt = `You are a Vietnamese stock market analyst. Provide an investment insight for ${ticker} in the "${sector}" sector.
-
-Financial data: ${JSON.stringify(financialData)}
-Recent price change: ${priceChangePercent}%
-
-Return a JSON object with:
-- "summary": 2-3 sentence investment insight in English
-- "sentiment": one of "bullish", "bearish", or "neutral"
-- "keyPoints": array of 2-3 positive points (short strings)
-- "risks": array of 1-2 risk factors (short strings)
-
-Return ONLY the JSON object, no markdown fences, no extra text.`;
-
-  try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().trim();
-    const cleaned = text.replace(/```(?:json)?\n?/g, "").replace(/```$/g, "").trim();
-    return JSON.parse(cleaned) as AIInsightResult;
-  } catch (error) {
-    console.error("[Gemini] Failed to generate AI insight:", error);
-    console.log("[Gemini] Falling back to mock data");
-    return getMockAIInsight(ticker, priceChangePercent);
-  }
+export async function askFollowUp(
+  originalAnalysis: MeetingAnalysis,
+  question: string,
+  options?: { signal?: AbortSignal }
+): Promise<{
+  answer: string;
+  relevantEvidence: string[];
+  confidence: "high" | "medium" | "low";
+}> {
+  const { system, user } = getFollowUpPrompt(originalAnalysis, question);
+  return callGeminiWithRetry(system, user, options);
 }

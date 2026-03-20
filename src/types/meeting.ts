@@ -1,10 +1,11 @@
 export interface MeetingAnalysis {
-  summary: string;
+  summaryPoints: string[];
+  overallSentiment: "bullish" | "bearish" | "neutral";
   speakers: Speaker[];
   redFlags: RedFlag[];
   promises: MeetingPromise[];
-  businessDirection: string;
   investmentImplications: string;
+  themes: string[];
 }
 
 export interface Speaker {
