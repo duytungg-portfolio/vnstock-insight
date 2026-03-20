@@ -1,92 +1,87 @@
 "use client";
 
-import { Sparkles } from "lucide-react";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-  CardAction,
-} from "@/components/ui/card";
+import { motion } from "framer-motion";
+import { Sparkles, AlertTriangle, Lightbulb } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import type { AIInsightResult } from "@/lib/gemini";
-
-const sentimentConfig = {
-  bullish: {
-    label: "Bullish",
-    variant: "default" as const,
-    className: "bg-emerald-600 text-white",
-  },
-  bearish: {
-    label: "Bearish",
-    variant: "destructive" as const,
-    className: "",
-  },
-  neutral: {
-    label: "Neutral",
-    variant: "secondary" as const,
-    className: "",
-  },
-};
 
 interface AIInsightProps {
-  insight: AIInsightResult;
+  insight: string;
+  keyRisk: string;
+  keyOpportunity: string;
+  actionTags: string[];
 }
 
-export function AIInsight({ insight }: AIInsightProps) {
-  const config = sentimentConfig[insight.sentiment];
-
+export function AIInsight({
+  insight,
+  keyRisk,
+  keyOpportunity,
+  actionTags,
+}: AIInsightProps) {
   return (
-    <Card className="h-full">
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-primary" />
-          AI Insight
-        </CardTitle>
-        <CardAction>
-          <Badge variant={config.variant} className={cn(config.className)}>
-            {config.label}
-          </Badge>
-        </CardAction>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <p className="text-sm leading-relaxed text-foreground/90">
-          {insight.summary}
-        </p>
+    <div className="space-y-4">
+      {/* Main insight */}
+      <motion.p
+        className="text-sm leading-relaxed"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.5 }}
+      >
+        {insight}
+      </motion.p>
 
-        {insight.keyPoints.length > 0 && (
+      {/* Risk & Opportunity */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <motion.div
+          className="flex gap-2.5 rounded-lg border border-red-500/20 bg-red-500/5 p-3"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15, duration: 0.4 }}
+        >
+          <AlertTriangle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
           <div>
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
-              Key Points
+            <p className="text-[11px] font-medium text-red-600 dark:text-red-400 mb-0.5">
+              Rủi ro chính
             </p>
-            <ul className="space-y-1.5">
-              {insight.keyPoints.map((point, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm">
-                  <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
-                  {point}
-                </li>
-              ))}
-            </ul>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {keyRisk}
+            </p>
           </div>
-        )}
+        </motion.div>
 
-        {insight.risks.length > 0 && (
+        <motion.div
+          className="flex gap-2.5 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25, duration: 0.4 }}
+        >
+          <Lightbulb className="h-4 w-4 text-emerald-500 shrink-0 mt-0.5" />
           <div>
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
-              Risks
+            <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 mb-0.5">
+              Cơ hội chính
             </p>
-            <ul className="space-y-1.5">
-              {insight.risks.map((risk, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm">
-                  <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-red-500 shrink-0" />
-                  {risk}
-                </li>
-              ))}
-            </ul>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {keyOpportunity}
+            </p>
           </div>
-        )}
-      </CardContent>
-    </Card>
+        </motion.div>
+      </div>
+
+      {/* Action Tags */}
+      {actionTags.length > 0 && (
+        <motion.div
+          className="flex items-center gap-2 flex-wrap"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.35, duration: 0.3 }}
+        >
+          <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
+          {actionTags.map((tag) => (
+            <Badge key={tag} variant="secondary" className="text-xs">
+              {tag}
+            </Badge>
+          ))}
+        </motion.div>
+      )}
+    </div>
   );
 }
